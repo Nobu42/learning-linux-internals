@@ -642,4 +642,429 @@ execve() で読み込まれる実行ファイル形式
   ↓
 実行中プロセスの仮想メモリ配置を見る
 ```
+## プロセスの状態
+
+```bash
+ps aux
+```
+
+`ps aux` は、Linux上で動いているプロセス一覧を見る基本コマンド。
+
+今日のテーマでは、特に `STAT` 列を見る。
+
+`STAT` の主な意味:
+
+- `R`: running。実行中、または実行可能
+- `S`: sleeping。割り込み可能な待機状態
+- `D`: uninterruptible sleep。割り込み不能な待機状態。主にI/O待ち
+- `T`: stopped。停止中
+- `Z`: zombie。ゾンビプロセス
+- `I`: idle kernel thread。アイドル状態のカーネルスレッド
+
+追加記号:
+
+- `s`: セッションリーダー
+- `+`: フォアグラウンドプロセスグループ
+- `<`: 高優先度
+- `N`: 低優先度
+- `l`: マルチスレッド
+
+例:
+
+```text
+Ss = sleeping + session leader
+R+ = running + foreground process group
+```
+
+## プロセスの終了と wait
+
+```bash
+cat wait-ret.sh
+```
+
+```bash
+#!/bin/bash
+
+false &
+
+wait $!
+
+echo "false コマンドが終了しました:$?"
+```
+
+実行結果:
+
+```text
+false コマンドが終了しました:1
+```
+
+意味:
+
+- `false` は終了ステータス `1` で終了するコマンド
+- `&` はバックグラウンド実行
+- `$!` は直前にバックグラウンド実行したプロセスのPID
+- `wait $!` は、その子プロセスの終了を待つ
+- `$?` は直前のコマンドの終了ステータス
+
+大事なこと:
+
+```text
+子プロセスの終了ステータスは、親プロセスが wait で回収する。
+```
+
+親が子の終了ステータスを回収しないと、終了した子プロセスは一時的にゾンビプロセスとして残ることがある。
+
+## ゾンビプロセスと孤児プロセス
+
+ゾンビプロセス:
+
+- 子プロセスが終了した
+- しかし親プロセスがまだ `wait` していない
+- 終了ステータスを親に渡すため、プロセステーブル上に残っている
+- `ps` では `STAT` が `Z` になる
+
+孤児プロセス:
+
+- 子プロセスが生きている間に、親プロセスが先に終了した
+- 親を失ったプロセス
+- 通常は PID 1 の `systemd` などに引き取られる
+
+大事な違い:
+
+```text
+ゾンビプロセス:
+  すでに終了しているが、親に回収されていない
+
+孤児プロセス:
+  まだ動いているが、元の親がいなくなった
+```
+
+## シグナル
+
+シグナルは、プロセスに対してイベントや命令を伝える仕組み。
+
+今回見た主なシグナル:
+
+- `SIGINT`: `Ctrl-C` で送られる。通常は終了
+- `SIGTSTP`: `Ctrl-Z` で送られる。通常は一時停止
+- `SIGTERM`: `kill` のデフォルト。通常は終了
+
+## SIGINT を無視する
+
+```python
+#!/usr/bin/python3
+import signal
+
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+while True:
+    pass
+```
+
+意味:
+
+```text
+SIGINT を無視する
+```
+
+通常は `Ctrl-C` を押すと `SIGINT` が送られてプロセスは終了する。
+
+しかし、このプログラムでは `SIGINT` を無視しているため、`Ctrl-C` では止まらない。
+
+実行例:
+
+```text
+^C^C^C
+```
+
+何回 `Ctrl-C` を押しても終了しなかった。
+
+## Ctrl-Z と kill
+
+`Ctrl-Z` を押すと、`SIGTSTP` が送られてプロセスは一時停止する。
+
+```text
+^Z
+[1]+  停止                  ./intigore.py
+```
+
+`jobs` で停止中のジョブを確認できる。
+
+```bash
+jobs
+```
+
+```text
+[1]+  停止                  ./intigore.py
+```
+
+停止中のジョブを終了する:
+
+```bash
+kill %1
+```
+
+`kill` はデフォルトで `SIGTERM` を送る。
+
+今回のプログラムは `SIGINT` だけを無視していたため、`SIGTERM` では終了した。
+
+## シグナルハンドラ
+
+今回のコード:
+
+```python
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+```
+
+これは独自処理を書くのではなく、`SIGINT` を無視する設定。
+
+独自のシグナルハンドラを書く例:
+
+```python
+#!/usr/bin/python3
+import signal
+import time
+
+def handler(signum, frame):
+    print("SIGINTを受け取りました。でも終了しません。")
+
+signal.signal(signal.SIGINT, handler)
+
+while True:
+    time.sleep(1)
+```
+
+流れ:
+
+```text
+Ctrl-C
+  ↓
+SIGINT
+  ↓
+handler() が呼ばれる
+  ↓
+プロセスは続行
+```
+
+## シェルのジョブ管理
+
+```bash
+sleep infinity &
+sleep infinity &
+jobs
+```
+
+実行例:
+
+```text
+[1] 7980
+[2] 7981
+[1]-  実行中               sleep infinity &
+[2]+  実行中               sleep infinity &
+```
+
+意味:
+
+- `&`: バックグラウンドで実行する
+- `[1]`, `[2]`: bashのジョブ番号
+- `7980`, `7981`: LinuxのPID
+- `+`: カレントジョブ
+- `-`: 前のジョブ
+
+大事な違い:
+
+```text
+PID:
+  Linuxカーネルが管理するプロセスID
+
+ジョブ番号:
+  bashが管理する番号
+```
+
+例:
+
+```bash
+kill 7980
+```
+
+PIDを指定して終了する。
+
+```bash
+kill %1
+```
+
+bashのジョブ番号を指定して終了する。
+
+## fg と Ctrl-Z
+
+```bash
+fg 1
+```
+
+ジョブ1をフォアグラウンドに戻す。
+
+その状態で `Ctrl-Z` を押すと、フォアグラウンドジョブに `SIGTSTP` が送られ、一時停止する。
+
+流れ:
+
+```text
+sleep infinity &
+  ↓
+バックグラウンドジョブ
+
+fg 1
+  ↓
+フォアグラウンドに戻す
+
+Ctrl-Z
+  ↓
+SIGTSTPで停止
+
+kill %1
+  ↓
+SIGTERMで終了
+```
+
+## セッション
+
+```bash
+ps ajx
+```
+
+`ps ajx` は、ジョブ制御に関係する情報を見るのに便利。
+
+主な列:
+
+- `PPID`: 親プロセスID
+- `PID`: 自分のプロセスID
+- `PGID`: プロセスグループID
+- `SID`: セッションID
+- `TTY`: 制御端末
+- `TPGID`: その端末のフォアグラウンドプロセスグループID
+
+例:
+
+```text
+PPID   PID   PGID   SID   TTY    TPGID STAT COMMAND
+7475  7476   7476  7476   pts/0  7988  Ss   -bash
+7476  7988   7988  7476   pts/0  7988  R+   ps ajx
+```
+
+意味:
+
+- `bash` はセッションリーダー
+- `ps ajx` はbashから起動された子プロセス
+- `ps ajx` の `PGID` と `TPGID` が同じなので、フォアグラウンドプロセスグループにいる
+
+大事なこと:
+
+```text
+セッション:
+  ログイン単位に近いまとまり
+
+プロセスグループ:
+  ジョブ単位に近いまとまり
+
+制御端末:
+  そのセッションが操作している端末
+
+フォアグラウンドプロセスグループ:
+  今その端末から入力を受け取れるプロセスグループ
+```
+
+## プロセスグループ
+
+```bash
+ps ajx | less
+```
+
+このコマンドは1つのジョブだが、内部では2つのプロセスが動く。
+
+```text
+ps ajx
+less
+```
+
+観察例:
+
+```text
+PID   PGID   SID   TTY    TPGID STAT COMMAND
+7997  7997   7476  pts/0  7997  R+   ps ajx
+7998  7997   7476  pts/0  7997  S+   less
+```
+
+大事なこと:
+
+- `ps ajx` と `less` は別プロセス
+- しかし同じ `PGID` に入っている
+- パイプライン全体が1つのジョブとして扱われる
+
+図:
+
+```text
+プロセスグループ 7997
+  ├─ ps ajx
+  └─ less
+```
+
+`TPGID = 7997` なので、このプロセスグループが端末のフォアグラウンドにいる。
+
+`Ctrl-C` や `Ctrl-Z` は、基本的に単一PIDではなく、フォアグラウンドプロセスグループに送られる。
+
+## デーモン
+
+```bash
+ps ajx | grep sshd
+```
+
+観察例:
+
+```text
+PPID  PID   PGID  SID   TTY  TPGID STAT COMMAND
+1     768   768   768   ?    -1    Ss   sshd: /usr/sbin/sshd -D [listener]
+768   7400  7400  7400  ?    -1    Ss   sshd: nobu [priv]
+7400  7475  7400  7400  ?    -1    S    sshd: nobu@pts/0
+```
+
+デーモンとは:
+
+- 端末操作のためではなく、裏で常駐してサービスを提供するプロセス
+- 制御端末を持たないことが多い
+- `TTY` が `?` になりやすい
+- `systemd` などから起動される
+
+例:
+
+- `sshd`: SSH接続を受け付ける
+- `cron`: 定期実行する
+- `dockerd`: Dockerを管理する
+- `systemd-journald`: ログを扱う
+
+`sshd` の流れ:
+
+```text
+systemd(1)
+  ↓
+sshd listener
+  ↓
+SSH接続を受ける
+  ↓
+sshd: nobu [priv]
+  ↓
+sshd: nobu@pts/0
+  ↓
+bash
+```
+
+## 今日の追記まとめ
+
+今日の大事な理解:
+
+```text
+プロセスには状態があり、ps の STAT で確認できる。
+子プロセスの終了は wait で回収する。
+シグナルはプロセスを終了・停止・再開させるための仕組み。
+bashはジョブ番号、プロセスグループ、フォアグラウンド制御を使ってジョブを管理している。
+デーモンは端末を持たず、バックグラウンドで常駐するサービスプロセス。
+```
 
