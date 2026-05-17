@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Generated data
+*.data
+
+# Generated images
+*.jpg
+*.png
+
+# Generated test files
+testfile
+
+# Compiled binaries
+Linux_Structure/01_Linux_Overview/hello
+Linux_Structure/01_Linux_Overview/pause
+Linux_Structure/02_Process_Management_Basic/pause
+Linux_Structure/04_Memory_Management_System/mmap
+Linux_Structure/04_Memory_Management_System/segv
+Linux_Structure/04_Memory_Management_System/segv-c
+
