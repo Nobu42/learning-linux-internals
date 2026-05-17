@@ -1,0 +1,458 @@
+# 04_Memory_Management_System
+
+## やったこと
+
+Linuxのメモリ管理について、以下を観察した。
+
+- システム全体のメモリ使用量
+- プロセスがメモリを確保したときの変化
+- ページキャッシュ
+- `mmap`
+- デマンドページング
+- ページフォルト
+- `SIGSEGV`
+- `sar` によるメモリ統計
+
+## free
+
+```bash
+free
+free -h
+```
+
+`free` はシステム全体のメモリ使用量を見るコマンド。
+
+主な列:
+
+- `total`: 物理メモリ全体
+- `used`: 使用中メモリ
+- `free`: 完全に空いているメモリ
+- `shared`: tmpfsなどで共有されているメモリ
+- `buff/cache`: バッファやページキャッシュ
+- `available`: 新しく使えると見込まれるメモリ
+
+大事なこと:
+
+```text
+free が少ない = メモリ不足
+```
+
+とは限らない。
+
+Linuxは空きメモリをページキャッシュとして使うため、余裕を見るときは `available` が重要。
+
+## Pythonでメモリ確保
+
+```python
+#!/usr/bin/python3
+
+import subprocess
+
+size = 10000000
+
+print("メモリ獲得前のシステム全体のメモリ使用量を表示します。")
+subprocess.run(["free", "-h"])
+
+array = [0] * size
+
+print("メモリ獲得後のシステム全体のメモリ空き容量を表示します。")
+subprocess.run(["free", "-h"])
+```
+
+`array = [0] * 10000000` で大きなリストを作った。
+
+観察結果:
+
+- `used` が増える
+- `free` と `available` が減る
+- プログラム終了後、メモリはだいたい元に戻る
+
+Pythonのリストは整数そのものを詰めるというより、オブジェクトへの参照を多く持つ。
+
+64bit環境では参照1個がおおむね8バイトなので:
+
+```text
+10,000,000 × 8 bytes = 約80MB
+```
+
+くらい増える。
+
+## ページキャッシュ
+
+```bash
+dd if=/dev/zero of=testfile bs=1M count=1K
+```
+
+意味:
+
+- `if=/dev/zero`: ゼロを返す特殊ファイルから読む
+- `of=testfile`: `testfile` に書く
+- `bs=1M`: 1回に1MiB書く
+- `count=1K`: 1024回書く
+
+つまり、1GiBのファイルを作る。
+
+観察結果:
+
+```text
+free が約1GiB減る
+buff/cache が約1GiB増える
+available は大きく変わらない
+```
+
+大事なこと:
+
+```text
+LinuxはファイルI/Oを高速化するためにページキャッシュを使う。
+ページキャッシュは必要になれば回収できる。
+```
+
+そのため、`buff/cache` が増えても、すぐにメモリ不足とは限らない。
+
+## sar -r
+
+```bash
+sar -r 1 5
+sar -rh 1 5
+```
+
+意味:
+
+- `sar`: System Activity Reporter
+- `-r`: メモリ使用状況を見る
+- `-h`: human readable
+- `1 5`: 1秒間隔で5回取得
+
+主な列:
+
+- `kbmemfree`: 空きメモリ
+- `kbavail`: 利用可能と見込まれるメモリ
+- `kbmemused`: 使用中メモリ
+- `%memused`: メモリ使用率
+- `kbbuffers`: バッファ
+- `kbcached`: ページキャッシュ
+- `kbcommit`: 将来使う可能性があるとして約束されたメモリ
+- `kbactive`: 最近使われたメモリ
+- `kbinact`: 最近あまり使われていないメモリ
+- `kbdirty`: まだディスクへ書き戻されていないページ
+
+`free` との対応:
+
+```text
+free の available ≒ sar の kbavail
+free の buff/cache ≒ sar の kbbuffers + kbcached
+```
+
+## 不正メモリアクセス Go版
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+    var p *int = nil
+    fmt.Println("不正メモリアクセス前")
+    *p = 0
+    fmt.Println("不正メモリアクセス後")
+}
+```
+
+実行結果:
+
+```text
+不正メモリアクセス前
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 ...]
+```
+
+意味:
+
+- `p` は `nil`
+- `*p = 0` でアドレス `0x0` に書き込もうとした
+- Linux的には `SIGSEGV`
+- Goランタイムが `panic` として表示する
+
+## 不正メモリアクセス C版
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+    int *p = NULL;
+    *p = 0;
+    return 0;
+}
+```
+
+実行結果:
+
+```text
+Segmentation fault (コアダンプ)
+```
+
+Go版もC版も根本は同じ。
+
+```text
+無効なアドレスへアクセス
+  ↓
+CPU/MMUが異常を検出
+  ↓
+Linuxカーネルがプロセスに SIGSEGV を送る
+  ↓
+プロセス終了
+```
+
+## mmap
+
+Goで `mmap()` を使い、1GiBの匿名メモリ領域を確保した。
+
+```text
+サイズ = 0x40000000
+```
+
+これは:
+
+```text
+0x40000000 = 1,073,741,824 bytes = 1GiB
+```
+
+`/proc/<pid>/maps` を見ると、`mmap` 後に新しい匿名メモリ領域が増えた。
+
+例:
+
+```text
+7fe9d9457000-7fea19657000 rw-p 00000000 00:00 0
+```
+
+意味:
+
+- `rw-p`: 読み取り可、書き込み可、private mapping
+- `00:00 0`: ファイルに紐づかない匿名メモリ
+- パス名なし: anonymous mapping
+
+大事なこと:
+
+```text
+mmapで仮想メモリ領域を作ると、/proc/<pid>/maps に見える。
+```
+
+ただし、`mmap` しただけで物理メモリがすぐ全量使われるとは限らない。
+
+## デマンドページング
+
+`demand-paging.py` で100MiBを `mmap` し、その後10MiBずつアクセスした。
+
+流れ:
+
+```text
+mmapで100MiBの仮想メモリ領域を確保
+  ↓
+Enter待ち
+  ↓
+10MiBずつページへ書き込み
+  ↓
+RSSやページフォルトの増加を観察
+```
+
+大事なこと:
+
+```text
+mmap直後:
+  仮想メモリは増える
+  物理メモリはまだ大きく増えない
+
+ページへ初めてアクセス:
+  ページフォルトが起きる
+  物理メモリが割り当てられる
+```
+
+これがデマンドページング。
+
+## capture.sh
+
+`capture.sh` で `demand-paging.py` のプロセスを監視した。
+
+出力形式:
+
+```text
+時刻: VSZ RSS MAJFLT MINFLT
+```
+
+意味:
+
+- `VSZ`: 仮想メモリサイズ
+- `RSS`: 実際に物理メモリに載っているサイズ
+- `MAJFLT`: メジャーフォールト数
+- `MINFLT`: マイナーフォールト数
+
+観察結果:
+
+```text
+mmap前:
+  VSZ 19564 KiB
+  RSS 9460 KiB
+
+mmap後:
+  VSZ 121964 KiB
+```
+
+差分:
+
+```text
+121964 - 19564 = 102400 KiB = 100MiB
+```
+
+つまり、`mmap` で仮想メモリが100MiB増えた。
+
+その後、10MiBずつアクセスすると:
+
+```text
+RSS が約10MiBずつ増える
+MINFLT が約2560ずつ増える
+MAJFLT は0のまま
+```
+
+## なぜ MINFLT が2560ずつ増えるか
+
+ページサイズは通常:
+
+```text
+4096 bytes = 4KiB
+```
+
+10MiBは:
+
+```text
+10 * 1024 * 1024 bytes
+```
+
+ページ数は:
+
+```text
+10MiB / 4KiB = 2560ページ
+```
+
+そのため、10MiBぶん初めてアクセスすると、約2560回のマイナーフォールトが発生する。
+
+## sar -B
+
+```bash
+sar -B 1
+```
+
+ページング関連の統計を見る。
+
+主な列:
+
+- `pgpgin/s`: 1秒あたりのページイン
+- `pgpgout/s`: 1秒あたりのページアウト
+- `fault/s`: 1秒あたりのページフォルト数
+- `majflt/s`: 1秒あたりのメジャーフォールト数
+- `pgfree/s`: 1秒あたりに解放されたページ数
+
+観察結果:
+
+```text
+fault/s  約2560
+majflt/s 0
+```
+
+意味:
+
+```text
+10MiBずつ初回アクセスしているため、約2560ページ分のページフォルトが起きた。
+ただしディスクI/Oは不要なので、メジャーフォールトではない。
+```
+
+## マイナーフォールトとメジャーフォールト
+
+マイナーフォールト:
+
+```text
+ディスクI/Oなしで解決できるページフォルト
+```
+
+メジャーフォールト:
+
+```text
+ディスクI/Oが必要なページフォルト
+```
+
+今回の匿名mmapでは、空き物理ページを割り当てればよいので、`MINFLT` は増えるが `MAJFLT` は増えなかった。
+
+## sar -r ALL
+
+```bash
+sar -r ALL 1
+```
+
+`-r ALL` で、通常より詳しいメモリ統計を見る。
+
+追加で見える主な項目:
+
+- `kbanonpg`: anonymous page
+- `kbslab`: カーネル内部データ構造用メモリ
+- `kbkstack`: カーネルスタック
+- `kbpgtbl`: ページテーブル用メモリ
+- `kbvmused`: vmalloc領域で使われているメモリ
+
+特に見るポイント:
+
+```text
+kbcached:
+  ページキャッシュ
+
+kbanonpg:
+  匿名メモリ。ヒープ、スタック、匿名mmapなど
+
+kbpgtbl:
+  ページテーブル用メモリ
+
+kbslab:
+  カーネル内部管理用メモリ
+```
+
+## 04_Memory_Management_System のまとめ
+
+今回の一番大事な理解:
+
+```text
+プロセスが見るメモリは仮想メモリ。
+物理メモリは、必要になったタイミングで割り当てられることがある。
+```
+
+重要ポイント:
+
+- `free` でシステム全体のメモリを見る
+- `available` はメモリ余裕を見るうえで重要
+- ファイルI/Oではページキャッシュが使われる
+- `buff/cache` は必要に応じて回収できる
+- 不正メモリアクセスは `SIGSEGV` になる
+- `mmap` で仮想メモリ領域を作れる
+- `/proc/<pid>/maps` で仮想メモリ配置を確認できる
+- `mmap` 直後はVSZが増える
+- 実際にページへアクセスするとRSSが増える
+- 初回アクセス時にページフォルトが起きる
+- 匿名メモリへの初回アクセスでは主にマイナーフォールトが起きる
+- `sar -B` でページフォルトを観察できる
+
+全体の流れ:
+
+```text
+mmap
+  ↓
+仮想メモリ領域を確保
+  ↓
+/proc/<pid>/maps や VSZ に見える
+  ↓
+ページへ初回アクセス
+  ↓
+ページフォルト
+  ↓
+物理メモリ割り当て
+  ↓
+RSS が増える
+```
+
